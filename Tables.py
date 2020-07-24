@@ -1,0 +1,253 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Jul 15 14:34:44 2020
+
+@author: VUB
+"""
+from dashboard.apps.pages.experiments.XML_parser import DataFrame
+from dashboard.apps.pages.experiments.XML_parser import table_schema
+
+# import DataFrame
+# import table_schema
+
+from lxml import etree
+from psycopg2 import sql
+import psycopg2
+import sys
+
+from pprint import pprint #used for debugging
+
+table_sizes = table_schema.table_sizes_dictionary
+                 
+file_path = "xml_files/test_2.xml"
+
+
+def five():
+    return 5
+
+def table_atts(table_name):
+    return table_schema.tbl_att_dict[table_name]
+
+#the next 4 lines could be removed, they're used to see the DataFrame formed with the root.
+#DataFrames are formed within the procedure "add_file"
+# tree = etree.parse(file_path) #load file
+# tree.xinclude() #Xinclude other files
+# root = tree.getroot() 
+# df = DataFrame.objectify_root(root) #make DataFrame 
+##
+
+connection = False
+cursor = False
+
+def new_func(no):
+    print("no")
+
+def connect():
+    global connection
+    connection = psycopg2.connect(user = "student-user",
+                                  password = "MiCLAD2020",
+                                  host = "192.168.142.4",
+                                  port = "5432",
+                                  database = "student-user")
+    global cursor
+    cursor = connection.cursor()
+    
+connect() #this call will initially connect to the database
+    
+    
+def disconnect():
+    if(connection):
+        cursor.close()
+        connection.close()
+    
+
+
+def table_data(table_name):
+    connect() #connect to the server 
+    
+    print ("executing SQL command!")
+    cursor.execute("SELECT * FROM {}".format(table_name)) #fetch the data
+    data = cursor.fetchall()
+    print("table_data TEST: {}".format(data))
+
+
+    connection.commit() #disconnect
+    disconnect()
+    return data #return the data
+
+    
+# Print PostgreSQL Connection properties
+# print ( connection.get_dsn_parameters(),"\n")
+
+# Print PostgreSQL version
+# cursor.execute("SELECT version();")
+# record = cursor.fetchone()
+# print("You are connected to - ", record,"\n")
+
+def create_tables():   
+    cursor.execute(table_schema.test_1_tbl_command)
+    cursor.execute(table_schema.test_2_tbl_command)
+#### uncommenting the for expression below would create all the tables within the DataBase
+#    for command in table_schema.all_tbl_commands:
+#        cursor.execute(command)
+    
+        
+def add_attributes(table_name, attributes):
+    cursor.execute("SET DateStyle to European")
+    attribute_names = attributes[0]
+    attributes = attributes[1]
+    try:
+        print ("trying")
+        in_str = ','.join(['%s'] * len(attributes)) # This will generate a string '%s,%s,%s...', so that the attributes can be passed
+        names_str = ','.join(['{}'] * len(attribute_names))
+        query = "INSERT INTO {} ({}) VALUES ({})".format(table_name, names_str, in_str)
+        query = query.format(*attribute_names)
+        print("PRINTING QUERY!: {}".format(query))
+        cursor.execute(query, attributes) #Executes the actual query in SQL
+    except Exception:
+        print("ERROR: ILLEGAL VALUE - Users Table")
+        print(sys.exc_info()[1]) #Shows the error message
+        
+def add_file(file_path):
+    
+    tree = etree.parse(file_path) #load file
+    tree.xinclude() #Xinclude other files
+    root = tree.getroot() 
+    df = DataFrame.objectify_root(root) #make DataFrame 
+    
+    
+    table_name = df[0][0]
+    if table_name == "user":
+        table_name = "users"
+    record_fields = df[0].tolist() #get list of fields
+    record_references = df[1].tolist() #get list
+    record_values = df[2].tolist() #get list of values
+    return add_record(record_fields, record_references, record_values)
+
+def reference_ID_and_subroot(file_path):
+    sub_tree = etree.parse(file_path)
+    sub_root = sub_tree.getroot()
+    if sub_root == "user": #the table name "user" is Illegal, and so we have to use the name "users" instead
+        sub_root = "users"
+    df = DataFrame.objectify_root(sub_root)
+    ID = df[2][1] #the index of the ID within the DataFrame is [2][1]
+    return [ID, sub_root]
+
+def reference_exists(file_path):
+    ID_and_subroot = reference_ID_and_subroot(file_path)
+    ID = ID_and_subroot[0]
+    sub_root = ID_and_subroot[1]
+    cursor.execute(sql.SQL("select exists(select 1 from {} where ID = (%s))").format(sql.Identifier(sub_root.tag)), [ID])
+    boolean = cursor.fetchall()[0][0] #fetchall returns a list of tuples. We have to dereference twice to get the boolean
+    return boolean
+
+def add_record(record_fields, record_references, record_values):
+    all_records = preprocess_DataFrame(record_fields, record_references, record_values)
+    
+    def get_attributes(record):
+        record.pop(0) #the first element contains the table name, and no attributes. Therefore it must be popped
+        attribute_names = []
+        attributes = []
+        for field, attribute, value in record:
+                attribute_names.append(field)
+                attributes.append(value)
+        return [attribute_names, attributes]
+                
+    for record in all_records:
+        table_name = record[0][0]
+        attributes = get_attributes(record)
+        add_attributes(table_name, attributes)
+    return True
+                
+            
+        
+def preprocess_DataFrame(record_fields, record_references, record_values):
+    all_records = []
+    
+    def look_for_record():
+        nmbr_of_found_attributes = 0
+        current_table_name = record_fields[0]
+        indx = 0
+        current_record = []
+        for field, attribute, value in zip(record_fields, record_references, record_values):
+            indx = indx + 1
+            if field in table_schema.table_names: #does the field refer to a new record?
+                current_table_name = field #if so, change the field_tag
+                nmbr_of_found_attributes = 0  #we start looking for the attributes of the record, and thus have to start over at 0
+                current_record = [[current_table_name, [], None]] #initialize the record
+                
+            elif table_schema.table_attributes(current_table_name, field):
+                nmbr_of_found_attributes = nmbr_of_found_attributes + 1
+                if "refid" in attribute:
+                    file_path = attribute["refid"]
+                    if (not reference_exists(file_path)): #if the reference does not yet exist, then add the file to the database
+                        add_file(file_path)
+                    current_record.append([field, [], reference_ID_and_subroot(file_path)[0]])
+                else: current_record.append([field, attribute, value]) #otherwise, add value to record
+                    
+                if (nmbr_of_found_attributes == table_sizes[current_table_name]): #check if we found all attributes of a record
+                    
+                    #the body of the if-test will cut the found record from record_fields, record_references and record_values
+                    #and return the found record, so that it can be added to the database
+                    first_attribute_indx = indx - table_sizes[current_table_name] - 1 
+                    del record_fields [first_attribute_indx:indx] #delete from the index of first attribute, to the index of last attribute
+                    del record_references [first_attribute_indx:indx]
+                    del record_values [first_attribute_indx:indx]
+                    return current_record
+            else:   nmbr_of_found_attributes = nmbr_of_found_attributes + 1
+                
+        return False
+                
+    while (record_fields): 
+        record = look_for_record() #we keep looking for records and appending them, until record_fields are empty
+        pprint(record)
+        if record:
+            all_records.append(record)
+        else: break #false was returned out of look_for_record()
+
+    #pprint(all_records) #uncomment this line to pretty print all_records
+    return all_records
+
+                    
+        
+        
+        
+# create_tables()
+# add_file("xml_files/test_2.xml")
+
+# print('\n')
+# print("TEST_1 contents!!!")
+# cursor.execute("SELECT * FROM test_1")
+# pprint(cursor.fetchall())
+
+# print('\n')
+# print("TEST_2 contents!!!")
+# cursor.execute("SELECT * FROM test_2")
+# pprint(cursor.fetchall())
+# cursor.execute("DROP TABLE test_1 CASCADE")
+# cursor.execute("DROP TABLE test_2 CASCADE")
+print("running XML-parser!")
+
+
+
+
+###### THE FOLLOWING BLOCK OF CODE WILL PRINT OUT EVERY TABLE IN THE DATABASE
+# cursor.execute("""SELECT table_name FROM information_schema.tables
+#         WHERE table_schema = 'public'""")
+# for table in cursor.fetchall():
+#     print(table)
+##############################################################################
+
+               
+
+
+
+    
+
+connection.commit()
+    
+
+
+#closing database connection.
+disconnect()
+print("PostgreSQL connection is closed")
